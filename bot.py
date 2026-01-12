@@ -4,25 +4,27 @@ import requests
 import threading
 from flask import Flask
 import os
+from datetime import datetime
 
 app = Flask(__name__)
 
+# פונקציה להפקת זמן נוכחי להודעות (לפי בקשתך)
+def get_current_time():
+    return datetime.now().strftime("%H:%M:%S")
+
 @app.route('/')
 def home():
-    return "Bot is Live and Secure", 200
+    return f"Bot is running. Time: {get_current_time()}", 200
 
 def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# משיכת המשתנים מה-Environment של Render
+# משיכת המשתנים מה-Environment (הגדרות מהתמונה ב-04:47:03 PM)
 TOKEN = os.environ.get("TELEGRAM_TOKEN")
 CHAT_ID = os.environ.get("CHAT_ID")
 
-SYMBOLS = [
-    'BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT',
-    'ADA/USDT', 'AVAX/USDT', 'DOT/USDT', 'MATIC/USDT', 'LINK/USDT'
-]
+SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'ADA/USDT', 'AVAX/USDT', 'DOT/USDT', 'MATIC/USDT', 'LINK/USDT']
 
 exchanges = {
     'bybit': ccxt.bybit(),
@@ -31,25 +33,24 @@ exchanges = {
 }
 
 def send_telegram_message(message):
-    # בדיקה אם המשתנים קיימים בזיכרון של השרת
     if not TOKEN or not CHAT_ID:
-        print(f"DEBUG: Credentials missing! TOKEN: {bool(TOKEN)}, CHAT: {bool(CHAT_ID)}")
+        print(f"[{get_current_time()}] ❌ שגיאה: פרטי הגישה לא נמצאו")
         return
     
+    # הוספת השעה להודעה בטלגרם
+    timed_message = f"[{get_current_time()}] {message}"
+    
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": message}
+    payload = {"chat_id": CHAT_ID, "text": timed_message}
     try:
         response = requests.post(url, json=payload, timeout=10)
-        print(f"Telegram status: {response.status_code} - {response.text}")
+        print(f"[{get_current_time()}] 📡 טלגרם החזיר סטטוס: {response.status_code}")
     except Exception as e:
-        print(f"Telegram connection error: {e}")
+        print(f"[{get_current_time()}] ❌ שגיאת תקשורת: {e}")
 
 def check_arbitrage():
-    # שורה זו חייבת להופיע ב-Logs כדי לדעת שהקוד רץ
-    print("🚀 Scanner started successfully")
-    
-    # ניסיון שליחה ראשון מיד עם העלייה
-    send_telegram_message("⚡️ הבוט חזר לפעילות! מתחיל סריקה מאובטחת.")
+    print(f"[{get_current_time()}] 🚀 הסורק עלה לאוויר בהצלחה")
+    send_telegram_message("הבוט התחבר מחדש ומתחיל סריקה.")
     
     while True:
         for symbol in SYMBOLS:
@@ -62,19 +63,18 @@ def check_arbitrage():
                     continue
 
             if len(prices) > 1:
-                highest = max(prices, key=prices.get)
-                lowest = min(prices, key=prices.get)
-                diff = ((prices[highest] - prices[lowest]) / prices[lowest]) * 100
+                hi = max(prices, key=prices.get)
+                lo = min(prices, key=prices.get)
+                diff = ((prices[hi] - prices[lo]) / prices[lo]) * 100
                 net_diff = diff - 0.2
 
                 if net_diff > 0.05:
-                    msg = (f"💰 פער נמצא!\n"
+                    msg = (f"💰 הזדמנות נמצאה!\n"
                            f"מטבע: {symbol}\n"
-                           f"קנה ב-{lowest}: {prices[lowest]}\n"
-                           f"מכור ב-{highest}: {prices[highest]}\n"
+                           f"קנה ב-{lo}: {prices[lo]}\n"
+                           f"מכור ב-{hi}: {prices[hi]}\n"
                            f"רווח נטו: {net_diff:.2f}%")
                     send_telegram_message(msg)
-        
         time.sleep(30)
 
 if __name__ == "__main__":
