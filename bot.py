@@ -19,52 +19,31 @@ def run_flask():
     port = int(os.environ.get("PORT", 10000))
     app.run(host='0.0.0.0', port=port)
 
-# משיכת המשתנים מה-Environment וניקוי רווחים
 TOKEN = os.environ.get("TELEGRAM_TOKEN", "").strip()
 CHAT_ID = os.environ.get("CHAT_ID", "").strip()
 
 def send_telegram_message(message):
-    # שורה שחייבת להופיע ביומנים כדי להוכיח שהקוד רץ
-    print(f"[{get_current_time()}] 🚀 ניסיון שליחה לטלגרם ל-ID: {CHAT_ID}")
-    
     if not TOKEN or not CHAT_ID:
-        print(f"[{get_current_time()}] ❌ שגיאה: TOKEN או CHAT_ID חסרים בהגדרות Render")
         return
-    
     url = f"https://api.telegram.org/bot{TOKEN}/sendMessage"
-    payload = {"chat_id": CHAT_ID, "text": f"[{get_current_time()}] {message}"}
-    
+    payload = {"chat_id": CHAT_ID, "text": message, "parse_mode": "Markdown"}
     try:
-        # הגדלת ה-timeout כדי למנוע קריסות
-        response = requests.post(url, json=payload, timeout=20)
-        # זה הדיווח הקריטי בלוגים
-        print(f"[{get_current_time()}] 📡 סטטוס טלגרם: {response.status_code}")
-        if response.status_code != 200:
-            print(f"[{get_current_time()}] ⚠️ טלגרם סירב לבקשה: {response.text}")
-    except Exception as e:
-        print(f"[{get_current_time()}] ❌ שגיאת תקשורת חמורה: {e}")
+        requests.post(url, json=payload, timeout=15)
+    except:
+        pass
 
 def check_arbitrage():
-    # סימן הזיהוי שחיפשת - הוא נמצא ממש כאן בשורה הבאה!
-    print(f"[{get_current_time()}] 💎 גרסה סופית - הבוט התניע!")
+    print(f"[{get_current_time()}] 💎 הבוט התניע! סף רווח נטו חדש: 0.2%")
+    send_telegram_message(f"✅ הבוט עודכן לסף רווח של 0.2% נטו (לאחר עמלות). [{get_current_time()}]")
     
-    # הודעה מיידית לבדיקה
-    send_telegram_message("✅ הבוט התחבר בהצלחה בגרסה המעודכנת ביותר!")
-    
-    SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'ADA/USDT', 'AVAX/USDT', 'DOT/USDT', 'MATIC/USDT', 'LINK/USDT']
+    SYMBOLS = ['BTC/USDT', 'ETH/USDT', 'SOL/USDT', 'BNB/USDT', 'XRP/USDT', 'ADA/USDT', 'AVAX/USDT', 'DOT/USDT', 'MATIC/USDT', 'LINK/USDT', 'PEPE/USDT']
     exchanges = {
-        'bybit': ccxt.bybit(),
-        'mexc': ccxt.mexc({'options': {'adjustForTimeDifference': True}}),
-        'okx': ccxt.okx()
+        'Bybit': ccxt.bybit(),
+        'MEXC': ccxt.mexc({'options': {'adjustForTimeDifference': True}}),
+        'OKX': ccxt.okx()
     }
     
-    last_heartbeat = time.time()
     while True:
-        # הודעת "אני חי" כל 30 דקות
-        if time.time() - last_heartbeat >= 1800:
-            send_telegram_message("🔄 דיווח חצי-שעתי: הבוט סורק ופעיל.")
-            last_heartbeat = time.time()
-
         for symbol in SYMBOLS:
             prices = {}
             for name, exchange in exchanges.items():
@@ -73,17 +52,31 @@ def check_arbitrage():
                     prices[name] = ticker['last']
                 except:
                     continue
+            
             if len(prices) > 1:
-                hi, lo = max(prices, key=prices.get), min(prices, key=prices.get)
-                net_diff = ((prices[hi] - prices[lo]) / prices[lo]) * 100 - 0.2
-                if net_diff > 0.05:
-                    send_telegram_message(f"💰 פער ב-{symbol}: רווח מוערך {net_diff:.2f}%")
+                hi_name = max(prices, key=prices.get)
+                lo_name = min(prices, key=prices.get)
+                price_hi = prices[hi_name]
+                price_lo = prices[lo_name]
+                
+                raw_diff = ((price_hi - price_lo) / price_lo) * 100
+                net_diff = raw_diff - 0.2  # עמלות קבועות
+                
+                # עדכון הסף ל-0.2% נטו ומעלה
+                if net_diff >= 0.2:
+                    msg = (
+                        f"💰 *הזדמנות רווח!* ({symbol})\n"
+                        f"📊 *רווח נטו:* {net_diff:.2f}% (אחרי עמלות)\n"
+                        f"📈 *הפרש גולמי:* {raw_diff:.2f}%\n"
+                        f"-----------------------\n"
+                        f"🛒 קנה ב-{lo_name}: {price_lo}\n"
+                        f"💰 מכור ב-{hi_name}: {price_hi}\n"
+                        f"⏰ שעה: {get_current_time()}"
+                    )
+                    send_telegram_message(msg)
         
-        # המתנה של 30 שניות בין סריקות
         time.sleep(30)
 
 if __name__ == "__main__":
-    # הרצת Flask ברקע למניעת כיבוי השרת
     threading.Thread(target=run_flask, daemon=True).start()
-    # הרצת הבוט
     check_arbitrage()
