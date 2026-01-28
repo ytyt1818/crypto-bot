@@ -3,32 +3,28 @@ import time
 import gspread
 from oauth2client.service_account import ServiceAccountCredentials
 import telebot
-import requests
-import json
+import ccxt
 from flask import Flask
 from threading import Thread
+import json
 
-# --- חלק 1: שרת דמה לשמירה על הבוט דולק ב-Render ---
+# --- 1. שרת לשמירה על הבוט דולק ב-Render ---
 app = Flask('')
-
 @app.route('/')
-def home():
-    return "Bot is running"
+def home(): return "Bot is Alive"
 
 def run_web():
-    # Render מחפש תשובה בפורט שהגדרנו (10000)
     port = int(os.environ.get('PORT', 10000))
     app.run(host='0.0.0.0', port=port)
 
-# הפעלת השרת ברקע
 Thread(target=run_web).start()
 
-# --- חלק 2: הגדרות הבוט והאקסל ---
+# --- 2. הגדרות וחיבורים ---
 TOKEN = os.environ.get('TELEGRAM_BOT_TOKEN')
+CHAT_ID = os.environ.get('TELEGRAM_CHAT_ID')
 SHEET_NAME = "arbit-bot-live_Control_Panel"
 bot = telebot.TeleBot(TOKEN)
 
-# פונקציה להתחברות לאקסל
 def get_gsheet():
     scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
     creds_json = json.loads(os.environ.get('GSPREAD_CREDENTIALS'))
@@ -36,49 +32,62 @@ def get_gsheet():
     client = gspread.authorize(creds)
     return client.open(SHEET_NAME)
 
-# משתנים למעקב אחרי שינויים
+# אתחול בורסות
+exchanges = {
+    'mexc': ccxt.mexc(),
+    'bingx': ccxt.bingx(),
+    'xt': ccxt.xt(),
+    'bitmart': ccxt.bitmart(),
+    'kucoin': ccxt.kucoin()
+}
+
 last_settings = {}
 
-def check_for_settings_changes(sheet):
+# --- 3. פונקציות עזר ---
+def check_settings(sheet):
     global last_settings
-    try:
-        settings_sheet = sheet.worksheet("Settings")
-        current_settings = {
-            "interval": settings_sheet.acell('B3').value,
-            "profit": settings_sheet.acell('B5').value
-        }
-        
-        if last_settings and current_settings != last_settings:
-            msg = f"⚙️ **זוהה שינוי בהגדרות:**\n"
-            msg += f"⏱ זמן סריקה: {last_settings['interval']} -> {current_settings['interval']} שניות\n"
-            msg += f"📈 רווח יעד: {last_settings['profit']}% -> {current_settings['profit']}%"
-            bot.send_message(os.environ.get('TELEGRAM_CHAT_ID'), msg)
-        
-        last_settings = current_settings
-        return current_settings
-    except Exception as e:
-        print(f"Error checking settings: {e}")
-        return None
+    s_sheet = sheet.worksheet("Settings")
+    current = {
+        "interval": s_sheet.acell('B3').value,
+        "profit": s_sheet.acell('B5').value
+    }
+    if last_settings and current != last_settings:
+        msg = f"⚙️ **שינוי בהגדרות:**\n⏱ אינטרוול: {current['interval']}s\n📈 יעד: {current['profit']}%"
+        bot.send_message(CHAT_ID, msg)
+    last_settings = current
+    return current
 
-# --- חלק 3: הלולאה הראשית ---
 def main():
-    chat_id = os.environ.get('TELEGRAM_CHAT_ID')
-    bot.send_message(chat_id, "🚀 **arbit-bot-live הופעל!**\nהבוט מחובר ושומר על חיבור יציב.")
-    
+    bot.send_message(CHAT_ID, "🚀 **arbit-bot-live הופעל וסורק!**")
     while True:
         try:
             sheet = get_gsheet()
-            settings = check_for_settings_changes(sheet)
+            settings = check_settings(sheet)
+            pairs_sheet = sheet.worksheet("pairs")
+            pairs = pairs_sheet.col_values(1)[1:] # מדלג על הכותרת
             
-            # כאן תבוא לוגיקת הסריקה של הבורסות (mexc, bingx וכו')
-            print("Sensing markets...")
+            target_profit = float(settings['profit'])
             
-            # המתנה לפי האקסל (B3)
-            wait_time = int(settings['interval']) if settings else 60
-            time.sleep(wait_time)
+            for pair in pairs:
+                prices = {}
+                for name, ex in exchanges.items():
+                    try:
+                        ticker = ex.fetch_ticker(pair)
+                        prices[name] = ticker['last']
+                    except: continue
+                
+                if len(prices) > 1:
+                    low_ex = min(prices, key=prices.get)
+                    high_ex = max(prices, key=prices.get)
+                    diff = ((prices[high_ex] - prices[low_ex]) / prices[low_ex]) * 100
+                    
+                    if diff >= target_profit:
+                        msg = f"💰 **הזדמנות נמצאה!**\n💎 צמד: {pair}\n📉 קנייה ב-{low_ex}: {prices[low_ex]}\n📈 מכירה ב-{high_ex}: {prices[high_ex]}\n📊 פער: {diff:.2f}%"
+                        bot.send_message(CHAT_ID, msg)
             
+            time.sleep(int(settings['interval']))
         except Exception as e:
-            print(f"Error in main loop: {e}")
+            print(f"Error: {e}")
             time.sleep(30)
 
 if __name__ == "__main__":
