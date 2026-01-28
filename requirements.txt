@@ -2,3 +2,5 @@ gspread
 oauth2client
 pyTelegramBotAPI
 requests
+flask
+ccxt
