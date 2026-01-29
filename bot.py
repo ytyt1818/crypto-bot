@@ -7,7 +7,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime
 
-# הגדרת לוגים קריטית לניטור מרחוק
+# הגדרת לוגים מקצועית למניעת ניחושים בתקלות
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -15,94 +15,92 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# הגדרות בוט ומשתני סביבה
+# --- הגדרות בוט וחיבורים ---
 TOKEN = os.getenv('TELEGRAM_TOKEN')
-MY_CHAT_ID = os.getenv('MY_CHAT_ID') # מומלץ להוסיף ב-Render כדי לקבל התראות אוטומטיות
 bot = telebot.TeleBot(TOKEN)
 
-# אתחול בורסות - CCXT
-EXCHANGES_CONFIG = {
-    'binance': ccxt.binance({'enableRateLimit': True}),
-    'bybit': ccxt.bybit({'enableRateLimit': True}),
-    'kucoin': ccxt.kucoin({'enableRateLimit': True}),
-    'okx': ccxt.okx({'enableRateLimit': True})
+# מצב מערכת מרכזי - מוגדר מראש עבורך
+state = {
+    "is_running": True,
+    "profit_threshold": 0.3,
+    "symbol": "BTC/USDT",
+    "target_chat_id": None, 
+    "active_exchanges": ['binance', 'bybit', 'kucoin', 'okx', 'mexc', 'bingx']
 }
 
-def fetch_exchange_data(ex_id, symbol="BTC/USDT"):
-    """פונקציה לסריקת בורסה בודדת - מבודדת לחלוטין למניעת קריסת המערכת"""
+# אתחול אוטומטי של בורסות - ללא צורך במגע יד אדם
+exchanges = {}
+for ex_id in state["active_exchanges"]:
     try:
-        ex_instance = EXCHANGES_CONFIG[ex_id]
-        ticker = ex_instance.fetch_ticker(symbol)
-        return {
-            'id': ex_id,
-            'bid': ticker['bid'], # מחיר מכירה (הכי גבוה שקונה מוכן לשלם)
-            'ask': ticker['ask'], # מחיר קנייה (הכי נמוך שמוכר מוכן לקבל)
-            'last': ticker['last'],
-            'status': 'success'
-        }
+        ex_class = getattr(ccxt, ex_id)
+        exchanges[ex_id] = ex_class({'enableRateLimit': True})
+        logger.info(f"✅ Connection established: {ex_id}")
     except Exception as e:
-        logger.error(f"Failed to fetch {ex_id}: {str(e)}")
+        logger.error(f"❌ Connection failed: {ex_id} | {e}")
+
+# --- מנוע סריקה מקבילי (High-Performance Architecture) ---
+
+def fetch_single_ticker(ex_id):
+    try:
+        ticker = exchanges[ex_id].fetch_ticker(state["symbol"])
+        return {'id': ex_id, 'bid': ticker['bid'], 'ask': ticker['ask'], 'status': 'success'}
+    except:
         return {'id': ex_id, 'status': 'failed'}
 
-def arbitrage_engine(symbol="BTC/USDT", threshold=0.15):
-    """מנוע הארביטראז' המרכזי - סריקה מקבילית וחישוב פערים"""
-    logger.info(f"--- Arbitrage Engine Started for {symbol} ---")
+def arbitrage_monitor():
+    """סורק את כל הבורסות במקביל כל 20 שניות"""
     while True:
-        try:
-            # 1. סריקה במקביל של כל הבורסות
-            with ThreadPoolExecutor(max_workers=len(EXCHANGES_CONFIG)) as executor:
-                results = list(executor.map(lambda ex: fetch_exchange_data(ex, symbol), EXCHANGES_CONFIG.keys()))
+        if state["is_running"] and state["target_chat_id"]:
+            try:
+                with ThreadPoolExecutor(max_workers=len(exchanges)) as executor:
+                    results = list(executor.map(fetch_single_ticker, exchanges.keys()))
 
-            # 2. סינון תוצאות תקינות
-            valid = [r for r in results if r['status'] == 'success']
-            
-            if len(valid) > 1:
-                # מציאת הבורסה הזולה ביותר (לקנייה - Ask) והיקרה ביותר (למכירה - Bid)
-                low_ex = min(valid, key=lambda x: x['ask'])
-                high_ex = max(valid, key=lambda x: x['bid'])
-                
-                # חישוב פער באחוזים
-                profit_margin = ((high_ex['bid'] - low_ex['ask']) / low_ex['ask']) * 100
+                valid = [r for r in results if r['status'] == 'success']
+                if len(valid) > 1:
+                    low = min(valid, key=lambda x: x['ask'])
+                    high = max(valid, key=lambda x: x['bid'])
+                    profit = ((high['bid'] - low['ask']) / low['ask']) * 100
 
-                if profit_margin > threshold:
-                    msg = (
-                        f"⚠️ *הזדמנות ארביטראז' זוהתה!*\n\n"
-                        f"💎 נכס: `{symbol}`\n"
-                        f"📈 רווח פוטנציאלי: `{profit_margin:.3f}%`\n\n"
-                        f"🛒 קנייה (Ask) ב-{low_ex['id'].upper()}: `{low_ex['ask']}`\n"
-                        f"💰 מכירה (Bid) ב-{high_ex['id'].upper()}: `{high_ex['bid']}`\n\n"
-                        f"⏰ זמן: `{datetime.now().strftime('%H:%M:%S')}`"
-                    )
-                    logger.info(f"ARBITRAGE FOUND: {profit_margin:.3f}%")
-                    # שליחה לכל מי ששלח הודעה לבוט או ל-ID המוגדר
-                    if MY_CHAT_ID:
-                        bot.send_message(MY_CHAT_ID, msg, parse_mode='Markdown')
+                    if profit >= state["profit_threshold"]:
+                        msg = (f"🚀 *ארביטראז' נמצא!*\n\n"
+                               f"💎 נכס: `{state['symbol']}`\n"
+                               f"📈 רווח: `{profit:.3f}%` (יעד: {state['profit_threshold']}%)\n\n"
+                               f"🛒 קנה (Ask) ב-{low['id'].upper()}: `{low['ask']}`\n"
+                               f"💰 מכור (Bid) ב-{high['id'].upper()}: `{high['bid']}`\n\n"
+                               f"⏰ זמן: `{datetime.now().strftime('%H:%M:%S')}`")
+                        bot.send_message(state["target_chat_id"], msg, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Engine Error: {e}")
+        time.sleep(20)
 
-            time.sleep(15) # קצב סריקה מקצועי
-        except Exception as e:
-            logger.error(f"Critical error in engine: {e}")
-            time.sleep(10)
+# --- פקודות שליטה (אין צורך לשנות קוד) ---
 
 @bot.message_handler(commands=['status'])
-def status_handler(message):
-    global MY_CHAT_ID
-    MY_CHAT_ID = message.chat.id # מעדכן את ה-ID כדי שתקבל התראות
-    bot.reply_to(message, "✅ *מערכת ה-Arbitrage Pro באוויר*\nסורק כעת: Binance, Bybit, KuCoin, OKX.\nהתראות יישלחו לכאן אוטומטית.", parse_mode='Markdown')
+def cmd_status(message):
+    state["target_chat_id"] = message.chat.id
+    msg = (f"📊 *מצב בוט ארביטראז'*\n\n"
+           f"• סף רווח: `{state['profit_threshold']}%`\n"
+           f"• בורסות סרוקות: `{', '.join(exchanges.keys())}`\n"
+           f"• סטטוס: `סורק במקביל` ✅\n\n"
+           f"התראות יישלחו לכאן באופן אוטומטי.")
+    bot.reply_to(message, msg, parse_mode='Markdown')
 
-def start_bot():
-    """הפעלת הבוט עם הגנות מלאות"""
+@bot.message_handler(commands=['set_profit'])
+def cmd_set_profit(message):
+    try:
+        new_val = float(message.text.split()[1])
+        state['profit_threshold'] = new_val
+        bot.reply_to(message, f"✅ סף הרווח עודכן ל-`{new_val}%`")
+    except:
+        bot.reply_to(message, "⚠️ פורמט: `/set_profit 0.5`")
+
+# --- הפעלה יציבה ---
+if __name__ == "__main__":
+    threading.Thread(target=arbitrage_monitor, daemon=True).start()
     while True:
         try:
-            logger.info("Initializing connection - Cleaning Webhooks...")
             bot.remove_webhook()
-            logger.info("Bot is Live. Waiting for /status to identify user...")
-            bot.infinity_polling(timeout=25, long_polling_timeout=20)
+            bot.infinity_polling(timeout=25)
         except Exception as e:
-            logger.error(f"Bot Polling Crash: {e}. Restarting in 5s...")
+            logger.error(f"Bot Crash: {e}")
             time.sleep(5)
-
-if __name__ == "__main__":
-    # הפעלת המנוע ב-Thread נפרד
-    threading.Thread(target=arbitrage_engine, daemon=True).start()
-    # הפעלת הבוט
-    start_bot()
