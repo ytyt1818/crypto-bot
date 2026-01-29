@@ -3,6 +3,7 @@ import time
 import json
 import gspread
 import telebot
+from telebot import types # לייבוא כפתורים
 import ccxt
 import re
 import logging
@@ -16,7 +17,6 @@ from apscheduler.schedulers.background import BackgroundScheduler
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# --- שרת Flask ליציבות ---
 app = Flask('')
 @app.route('/')
 def home(): return f"Bot Active | IST: {time.ctime(time.time() + 7200)}"
@@ -55,82 +55,75 @@ def master_cycle():
         s_sheet = doc.worksheet("Settings")
         p_sheet = doc.worksheet("pairs")
         rows = s_sheet.get_all_values()
-        if len(rows) < 6: return 
         
         current = {
-            "target_profit": rows[4][1],
-            "keep_alive_interval": rows[5][1],
-            "exchanges": sorted(list(set([ex.strip().lower() for ex in s_sheet.col_values(3)[1:] if ex.strip()]))),
-            "pairs": sorted(list(set([p.strip().upper() for p in p_sheet.col_values(1)[1:] if p.strip()])))
+            "target_profit": rows[4][1] if len(rows) > 4 else "0.5",
+            "keep_alive_interval": rows[5][1] if len(rows) > 5 else "15",
+            "exchanges": [ex.strip().lower() for ex in s_sheet.col_values(3)[1:] if ex.strip()],
+            "pairs": [p.strip().upper() for p in p_sheet.col_values(1)[1:] if p.strip()]
         }
-
-        # דיווח שינויים
-        if state["last_settings"] and current["target_profit"]:
-            changes = []
-            ls = state["last_settings"]
-            if str(current["target_profit"]) != str(ls.get("target_profit")):
-                changes.append(f"📈 אחוז רווח: השתנה מ-`{ls.get('target_profit')}%` ל-`{current['target_profit']}%` ")
-            if changes:
-                bot.send_message(CHAT_ID, "⚙️ **עדכון מערכת:**\n\n" + "\n".join(changes))
-
         state["last_settings"] = current
 
-        # סריקת ארביטראז' בפועל
+        # סריקה אוטומטית להזדמנויות
         profit_threshold = float(current['target_profit'])
-        active_ex = {name: getattr(ccxt, name)() for name in current['exchanges'] if hasattr(ccxt, name)}
-        
         for pair in current['pairs']:
             prices = {}
-            for name, ex in active_ex.items():
+            for ex_name in current['exchanges']:
                 try:
-                    prices[name] = ex.fetch_ticker(pair)['last']
+                    exchange = getattr(ccxt, ex_name)()
+                    prices[ex_name] = exchange.fetch_ticker(pair)['last']
                 except: continue
             
             if len(prices) > 1:
                 low_ex, high_ex = min(prices, key=prices.get), max(prices, key=prices.get)
                 diff = ((prices[high_ex] - prices[low_ex]) / prices[low_ex]) * 100
                 if diff >= profit_threshold:
-                    bot.send_message(CHAT_ID, f"💰 **הזדמנות!** *{pair}*\n📊 פער: `{diff:.2f}%` \nקנייה ב-{low_ex} ➔ מכירה ב-{high_ex}")
+                    bot.send_message(CHAT_ID, f"💰 **הזדמנות!**\n\n🪙 מטבע: `{pair}`\n📊 פער: `{diff:.2f}%` \n🛒 {low_ex.upper()} ➔ 💎 {high_ex.upper()}")
 
-        # דיווח סטטוס
-        ka_val = int(float(current['keep_alive_interval']))
-        if (time.time() - state["last_keep_alive"]) >= (ka_val * 60):
-            bot.send_message(CHAT_ID, f"🔄 **סטטוס:** סורק {len(current['pairs'])} מטבעות ב-{len(current['exchanges'])} בורסות.")
-            state["last_keep_alive"] = time.time()
+    except Exception as e:
+        logger.error(f"Cycle Error: {e}")
 
-    except Exception as e: logger.error(f"Cycle Error: {e}")
+# --- פקודות תפריט דינמיות ---
 
-# --- פקודות בדיקה ושליטה ---
-
-@bot.message_handler(commands=['test_prices'])
-def test_prices(message):
-    """בדיקה ידנית שהחיבור לבורסות מושך מחירים"""
-    if not state["last_settings"]:
-        return bot.reply_to(message, "⏳ המתן לסיום סבב סריקה ראשון...")
+@bot.message_handler(commands=['compare'])
+def compare_menu(message):
+    """פותח תפריט כפתורים לבחירת מטבע מהאקסל"""
+    if not state["last_settings"] or not state["last_settings"]["pairs"]:
+        return bot.reply_to(message, "⏳ טוען נתונים, נסה שוב בעוד דקה.")
     
-    msg = "🔎 **בדיקת חיבור לבורסות:**\n\n"
-    pair = state["last_settings"]["pairs"][0]
+    markup = types.InlineKeyboardMarkup(row_width=2)
+    pairs = state["last_settings"]["pairs"]
+    
+    buttons = [types.InlineKeyboardButton(p, callback_data=f"comp_{p}") for p in pairs]
+    markup.add(*buttons)
+    
+    bot.send_message(message.chat.id, "🪙 **בחר מטבע להשוואת מחירים:**", reply_markup=markup)
+
+@bot.callback_query_handler(func=lambda call: call.data.startswith('comp_'))
+def handle_compare_choice(call):
+    """מטפל בלחיצה על כפתור המטבע"""
+    pair = call.data.replace('comp_', '')
     exchanges = state["last_settings"]["exchanges"]
     
+    bot.answer_callback_query(call.id, f"בודק את {pair}...")
+    msg = f"🔎 **השוואת מחירים עבור {pair}:**\n\n"
+    
+    prices = {}
     for name in exchanges:
         try:
             ex = getattr(ccxt, name)()
             price = ex.fetch_ticker(pair)['last']
-            msg += f"✅ {name}: `{price}`\n"
-        except Exception as e:
-            msg += f"❌ {name}: שגיאה במשיכת מחיר\n"
-    
-    bot.reply_to(message, msg)
-
-@bot.message_handler(commands=['set_profit'])
-def set_profit(message):
-    try:
-        val = message.text.split()[1]
-        get_sheet_safe().worksheet("Settings").update_acell('B5', val)
-        bot.reply_to(message, f"⏳ מעדכן רווח ל-`{val}%`...")
-        time.sleep(2)
-        master_cycle()
-    except: bot.reply_to(message, "ℹ️ שימוש: `/set_profit 0.5` ")
+            prices[name] = price
+            msg += f"✅ `{name.upper()}`: {price}\n"
+        except:
+            msg += f"❌ `{name.upper()}`: אין נתונים\n"
+            
+    if len(prices) > 1:
+        low_ex, high_ex = min(prices, key=prices.get), max(prices, key=prices.get)
+        diff = ((prices[high_ex] - prices[low_ex]) / prices[low_ex]) * 100
+        msg += f"\n📊 פער נוכחי: `{diff:.2f}%`"
+        
+    bot.edit_message_text(msg, call.message.chat.id, call.message.message_id)
 
 @bot.message_handler(commands=['status'])
 def cmd_status(message):
@@ -139,7 +132,7 @@ def cmd_status(message):
         msg = (f"⚙️ **מצב נוכחי:**\n"
                f"📈 רווח יעד: `{ls['target_profit']}%` \n"
                f"🏦 בורסות: `{', '.join(ls['exchanges'])}` \n"
-               f"🪙 מטבעות: `{len(ls['pairs'])}` ")
+               f"🪙 מטבעות: `{', '.join(ls['pairs'])}` ")
         bot.reply_to(message, msg)
 
 if __name__ == "__main__":
@@ -147,6 +140,4 @@ if __name__ == "__main__":
     scheduler = BackgroundScheduler()
     scheduler.add_job(master_cycle, 'interval', seconds=60)
     scheduler.start()
-    while True:
-        try: bot.polling(none_stop=True, timeout=40)
-        except: time.sleep(10)
+    bot.polling(none_stop=True)
