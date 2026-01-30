@@ -4,21 +4,22 @@ from datetime import datetime, timedelta
 from flask import Flask
 from concurrent.futures import ThreadPoolExecutor
 
-# 1. ניטור לוגים מקצועי
+# הגדרת לוגים בסיסית ונקייה
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# 2. שרת בריאות חיוני עבור Render
+# שרת Flask למניעת קריסת Render
 app = Flask(__name__)
 @app.route('/')
-def health(): return "SYSTEM_ONLINE", 200
+def health(): return "LIVE", 200
 
-# 3. משיכת משתנים מהגדרות ה-Environment שלך
+# משיכת פרמטרים מה-Environment
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 CHAT_ID = os.getenv('CHAT_ID')
-PORT = int(os.getenv('PORT', 10000))
+G_CREDS = os.getenv('GSPREAD_CREDENTIALS')
 bot = telebot.TeleBot(TOKEN)
 
+# מצב מערכת
 state = {
     "interval": 60,
     "profit": 0.3,
@@ -30,46 +31,43 @@ state = {
 def get_israel_time():
     return (datetime.utcnow() + timedelta(hours=2)).strftime('%H:%M:%S')
 
-# 4. סנכרון מול Google Sheets (שימוש במפתח GSPREAD_CREDENTIALS)
-def sync_from_google():
+# פונקציית סנכרון מותאמת בדיוק לטבלה שלך (C2, C4, E, G, H)
+def sync_logic():
     try:
-        # התאמה מדויקת לשם המפתח שב-Render
-        creds_json = os.getenv('GSPREAD_CREDENTIALS')
-        if not creds_json:
-            logger.error("Missing GSPREAD_CREDENTIALS key!")
-            return
-
+        if not G_CREDS: return
         scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
-        creds_dict = json.loads(creds_json)
-        creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+        creds = ServiceAccountCredentials.from_json_keyfile_dict(json.loads(G_CREDS), scope)
         client = gspread.authorize(creds)
         sheet = client.open("CryptoBot_Config").worksheet("settings")
+        data = sheet.get_all_values()
+
+        # עדכון תדירות ורווח (C2 ו-C4)
+        new_int = int(data[1][2])
+        new_prof = float(data[3][2])
         
-        # קריאת נתונים ודיווח על שינויים לקבוצה
-        new_prof = float(sheet.acell('C4').value)
+        # דיווח על שינוי ברווח אם קרה
         if new_prof != state["profit"]:
-            if CHAT_ID:
-                bot.send_message(CHAT_ID, f"🔄 *עדכון אקסל:* סף רווח שונה ל-`{new_prof}%`", parse_mode='Markdown')
+            bot.send_message(CHAT_ID, f"🔄 *עדכון רווח:* `{new_prof}%`", parse_mode='Markdown')
             state["profit"] = new_prof
         
-        state["interval"] = int(sheet.acell('C2').value)
-        state["exchanges"] = [ex.lower().strip() for ex in sheet.col_values(5)[1:] if ex]
+        state["interval"] = max(10, new_int)
         
-        p_list, s_list = sheet.col_values(7)[1:], sheet.col_values(8)[1:]
-        state["pairs"] = [p for p, s in zip(p_list, s_list) if s == 'V']
+        # עדכון בורסות (עמודה E) ומטבעות (עמודה G/H)
+        state["exchanges"] = [row[4].lower().strip() for row in data[1:] if len(row) > 4 and row[4]]
+        state["pairs"] = [row[6] for row in data[1:] if len(row) > 7 and row[7] == 'V']
         
-        logger.info("Google Sheets Sync: Success")
+        logger.info(f"Synced: {len(state['pairs'])} pairs")
     except Exception as e:
         logger.error(f"Sync error: {e}")
 
-# 5. מנוע הארביטראז' המקבילי
-def arbitrage_monitor():
+# מנוע הארביטראז' - שולח הודעות על רווחים
+def arbitrage_engine():
     while True:
-        sync_from_google()
-        if state["is_running"] and CHAT_ID and state["pairs"]:
+        sync_logic()
+        if state["pairs"] and state["exchanges"] and CHAT_ID:
             try:
-                # אתחול בורסות דינמי
-                instances = {ex: getattr(ccxt, ex)({'enableRateLimit': True}) for ex in state["exchanges"]}
+                # אתחול בורסות
+                instances = {ex: getattr(ccxt, ex)({'enableRateLimit': True}) for ex in state["exchanges"] if hasattr(ccxt, ex)}
                 
                 for symbol in state["pairs"]:
                     def fetch(ex_id):
@@ -82,31 +80,35 @@ def arbitrage_monitor():
                         res = [r for r in exe.map(fetch, instances.keys()) if r]
 
                     if len(res) > 1:
-                        low, high = min(res, key=lambda x: x['ask']), max(res, key=lambda x: x['bid'])
+                        low = min(res, key=lambda x: x['ask'])
+                        high = max(res, key=lambda x: x['bid'])
                         profit = ((high['bid'] - low['ask']) / low['ask']) * 100
+                        
                         if profit >= state["profit"]:
-                            bot.send_message(CHAT_ID, 
-                                f"💰 *הזדמנות רווח! {profit:.2f}%*\n🪙 `{symbol}`\n🛒 {low['id']}: {low['ask']}\n💎 {high['id']}: {high['bid']}", 
-                                parse_mode='Markdown')
+                            msg = (f"💰 *הזדמנות רווח! {profit:.2f}%*\n"
+                                   f"🪙 מטבע: `{symbol}`\n"
+                                   f"🛒 קנה ב-{low['id'].upper()}: `{low['ask']}`\n"
+                                   f"💎 מכור ב-{high['id'].upper()}: `{high['bid']}`")
+                            bot.send_message(CHAT_ID, msg, parse_mode='Markdown')
             except Exception as e:
-                logger.error(f"Engine loop error: {e}")
+                logger.error(f"Engine error: {e}")
+        
         time.sleep(state["interval"])
 
-# 6. הרצה חסינה
 if __name__ == "__main__":
-    # הפעלת שרת Port 10000 (מניעת קריסת Render)
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=PORT), daemon=True).start()
+    # 1. שרת בריאות
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=10000), daemon=True).start()
     
-    # ניקוי Webhook למניעת Conflict 409
+    # 2. ניקוי חיבורים קודמים (פותר שגיאת 409)
     bot.remove_webhook()
     time.sleep(2)
     
-    # הודעת הפעלה לקבוצה
+    # 3. הודעת הפעלה מיידית
     if CHAT_ID:
-        bot.send_message(CHAT_ID, f"🚀 *המערכת עלתה לאוויר בהצלחה!*\nזמן: `{get_israel_time()}`", parse_mode='Markdown')
+        bot.send_message(CHAT_ID, f"🚀 *המערכת פעילה! סורקת ומנטרת שינויים.*\nזמן: `{get_israel_time()}`", parse_mode='Markdown')
     
-    # הפעלת המנוע
-    threading.Thread(target=arbitrage_monitor, daemon=True).start()
+    # 4. הפעלת המנוע
+    threading.Thread(target=arbitrage_engine, daemon=True).start()
     
-    # תחילת האזנה לטלגרם
+    # 5. פולינג לבוט
     bot.infinity_polling(timeout=25)
