@@ -1,48 +1,113 @@
-import telebot, time, os, ccxt, threading, logging
-from flask import Flask
+import telebot
+import time
+import os
+import ccxt
+import logging
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
+from flask import Flask
 
-# לוגים לאבחון מהיר
+# 1. ניהול לוגים לניטור ב-Render
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(message)s')
 logger = logging.getLogger(__name__)
 
-# שרת בריאות למניעת שגיאות Port ב-Render
+# 2. שרת Flask לפתרון בעיית ה-Port ב-Render
 app = Flask(__name__)
 @app.route('/')
-def health(): return "ONLINE", 200
+def health(): return "SYSTEM_OPERATIONAL", 200
 
 TOKEN = os.getenv('TELEGRAM_TOKEN')
 bot = telebot.TeleBot(TOKEN)
 
-# מצב מערכת (Global State)
-state = {"profit": 0.3, "chat_id": None}
+# 3. הגדרות מנוע הסריקה
+state = {
+    "is_running": True,
+    "profit_threshold": 0.3,
+    "symbol": "ETH/USDT",
+    "chat_id": None,
+    "exchanges": ['binance', 'bybit', 'kucoin', 'okx', 'mexc', 'bingx']
+}
 
-# פקודות בוט (מענה לכל מה ששלחת בצילומים)
-@bot.message_handler(commands=['status', 'start', 'help', 'add_exchange', 'force_reload'])
-def universal_handler(m):
+# אתחול בורסות
+exchange_objs = {}
+for ex_id in state["exchanges"]:
+    try:
+        ex_instances = getattr(ccxt, ex_id)({'enableRateLimit': True})
+        exchange_objs[ex_id] = ex_instances
+    except: logger.error(f"Failed to load {ex_id}")
+
+def get_time():
+    return (datetime.utcnow() + timedelta(hours=2)).strftime('%H:%M:%S')
+
+# 4. מנוע הסריקה המקבילי (שולח הודעות לקבוצה)
+def arbitrage_engine():
+    logger.info("Arbitrage Engine Started...")
+    while True:
+        if state["is_running"] and state["chat_id"]:
+            try:
+                def fetch(ex_id):
+                    t = exchange_objs[ex_id].fetch_ticker(state["symbol"])
+                    return {'id': ex_id, 'bid': t['bid'], 'ask': t['ask'], 'ok': True}
+                
+                with ThreadPoolExecutor(max_workers=len(exchange_objs)) as exe:
+                    results = [r for r in exe.map(fetch, exchange_objs.keys()) if r['ok']]
+                
+                if len(results) > 1:
+                    low = min(results, key=lambda x: x['ask'])
+                    high = max(results, key=lambda x: x['bid'])
+                    profit = ((high['bid'] - low['ask']) / low['ask']) * 100
+
+                    if profit >= state["profit_threshold"]:
+                        msg = (f"💰 *הזדמנות ארביטראז'!*\n\n"
+                               f"🪙 מטבע: `{state['symbol']}`\n"
+                               f"📊 פער: `{profit:.2f}%`\n"
+                               f"🛒 קנה ב-{low['id'].upper()}: `{low['ask']}`\n"
+                               f"💎 מכור ב-{high['id'].upper()}: `{high['bid']}`\n"
+                               f"⏰ זמן: `{get_time()}`")
+                        bot.send_message(state["chat_id"], msg, parse_mode='Markdown')
+            except Exception as e:
+                logger.error(f"Engine Loop Error: {e}")
+        time.sleep(30) # סריקה כל 30 שניות ליציבות
+
+# 5. Handlers אמיתיים לפקודות (לא תשובות סתמיות)
+@bot.message_handler(commands=['status'])
+def cmd_status(m):
     state["chat_id"] = m.chat.id
-    israel_time = (datetime.utcnow() + timedelta(hours=2)).strftime('%H:%M:%S')
-    bot.reply_to(m, f"✅ המערכת מחוברת! (זמן: {israel_time})\nכל הפקודות פעילות כעת.")
+    msg = (f"📊 *סטטוס מערכת מבצעי*\n\n"
+           f"🕒 זמן ישראל: `{get_time()}`\n"
+           f"📈 סף רווח: `{state['profit_threshold']}%`\n"
+           f"🏦 בורסות פעילות: `{', '.join(exchange_objs.keys())}`\n"
+           f"✅ המנוע סורק ושולח התראות.")
+    bot.reply_to(m, msg, parse_mode='Markdown')
 
 @bot.message_handler(commands=['set_profit'])
-def set_p(m):
+def cmd_set_profit(m):
     try:
-        state['profit'] = float(m.text.split()[1])
-        bot.reply_to(m, f"✅ סף רווח עודכן ל-{state['profit']}%")
-    except: pass
+        val = float(m.text.split()[1])
+        state['profit_threshold'] = val
+        bot.reply_to(m, f"✅ סף הרווח עודכן ל-`{val}%`")
+    except:
+        bot.reply_to(m, "⚠️ פורמט שגוי. השתמש ב: `/set_profit 0.5`")
 
-# מנגנון הרצה חסין Conflict 409
-def start_engine():
+@bot.message_handler(commands=['help'])
+def cmd_help(m):
+    msg = ("📖 *מדריך פקודות:*\n"
+           "/status - הפעלת המנוע וקבלת מצב\n"
+           "/set_profit - שינוי אחוז הרווח\n"
+           "/force_reload - רענון חיבורי בורסות")
+    bot.reply_to(m, msg, parse_mode='Markdown')
+
+# 6. הרצה חסינת תקלות
+if __name__ == "__main__":
+    # הפעלת שרת ה-Port עבור Render
+    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
+    # הפעלת מנוע הסריקה
+    threading.Thread(target=arbitrage_engine, daemon=True).start()
+    
     while True:
         try:
-            logger.info("FORCE CLEANING CONNECTIONS...")
-            bot.remove_webhook() # התיקון לשגיאה 409
-            bot.infinity_polling(timeout=20, long_polling_timeout=15)
-        except Exception as e:
-            logger.error(f"Reconnecting: {e}")
+            bot.remove_webhook() # פותר Conflict 409
+            bot.infinity_polling(timeout=25)
+        except:
             time.sleep(5)
-
-if __name__ == "__main__":
-    # הפעלת שרת ה-Port (פותר את ה-No open ports)
-    threading.Thread(target=lambda: app.run(host='0.0.0.0', port=int(os.environ.get("PORT", 10000))), daemon=True).start()
-    start_engine()
