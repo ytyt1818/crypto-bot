@@ -13,89 +13,88 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
-# --- משיכת משתני סביבה מה-Render שלך ---
-# שימוש בשמות המדויקים שמופיעים בצילום המסך image_254102.png
-TOKEN = os.getenv('TELEGRAM_TOKEN') 
+# משיכת משתני סביבה מה-Render שלך
+TOKEN = os.getenv('TELEGRAM_TOKEN')
+SPREADSHEET_ID = os.getenv('SPREADSHEET_ID')
 JSON_CREDS = os.getenv('GSPREAD_CREDENTIALS')
-SPREADSHEET_ID = "1W29_M8Wv_hEitYv3S6u7p_x9-y6x0Z4Nq3L-y0V8Y_I" # ה-ID מה-URL שלך
-SHEET_NAME = "Settings" # השם המדויק מהאקסל שלך (image_24be54.png)
 
-# אתחול הבוט
 bot = telebot.TeleBot(TOKEN)
 
-class ArbitrageSystem:
+class ArbitrageArchitect:
     def __init__(self):
         self.client = None
         self.sheet = None
-        self.creds = self._prepare_creds()
-
-    def _prepare_creds(self):
-        """הכנת אישורים מתוך משתנה הסביבה של Render"""
-        try:
-            scope = [
-                "https://spreadsheets.google.com/feeds",
-                "https://www.googleapis.com/auth/spreadsheets",
-                "https://www.googleapis.com/auth/drive"
-            ]
-            creds_dict = json.loads(JSON_CREDS)
-            return ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
-        except Exception as e:
-            logger.error(f"Failed to parse GSPREAD_CREDENTIALS: {e}")
-            return None
 
     def connect(self):
-        """חיבור אקטיבי לגיליון Settings עם מנגנון Reconnect"""
+        """חיבור מבוסס Credentials עם מנגנון אימות מחדש"""
         try:
-            self.client = gspread.authorize(self.creds)
-            # פתיחה לפי השם המדויק שמופיע באקסל שלך
-            self.sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet(SHEET_NAME)
-            logger.info(f"Successfully connected to sheet: {SHEET_NAME}")
+            scope = ["https://spreadsheets.google.com/feeds", "https://www.googleapis.com/auth/drive"]
+            creds_dict = json.loads(JSON_CREDS)
+            creds = ServiceAccountCredentials.from_json_keyfile_dict(creds_dict, scope)
+            self.client = gspread.authorize(creds)
+            # פתיחת הלשונית Settings בדיוק כפי שהיא מופיעה באקסל
+            self.sheet = self.client.open_by_key(SPREADSHEET_ID).worksheet("Settings")
             return True
         except Exception as e:
-            logger.error(f"Connection error to {SHEET_NAME}: {e}")
+            logger.error(f"Critical Connection Error: {e}")
             return False
 
-    def get_settings_data(self):
-        """משיכת נתונים מהגיליון עם טיפול בשגיאות רשת"""
+    def get_data(self):
+        """קריאת הנתונים לפי המבנה המדויק: Setting Name (A), Value (B) וכו'"""
         try:
             if not self.sheet: self.connect()
-            return self.sheet.get_all_records()
+            records = self.sheet.get_all_records()
+            
+            summary = {
+                "params": {},
+                "exchanges": [],
+                "pairs": []
+            }
+            
+            for row in records:
+                # מיפוי עמודה A ו-B
+                key = row.get('Setting Name (A)')
+                val = row.get('Value (B)')
+                if key and val:
+                    summary["params"][key] = val
+                
+                # מיפוי עמודה C (בורסות)
+                exch = row.get('Active_Exchanges (C)')
+                if exch:
+                    summary["exchanges"].append(exch)
+                
+                # מיפוי עמודה D (צמדים)
+                pair = row.get('Pairs (D)')
+                if pair:
+                    summary["pairs"].append(pair)
+            
+            return summary
         except Exception as e:
-            logger.warning("Session expired. Reconnecting...")
-            if self.connect():
-                return self.sheet.get_all_records()
+            logger.error(f"Data Fetch Error: {e}")
             return None
 
 # אתחול המערכת
-sys_manager = ArbitrageSystem()
-
-# --- פקודות טלגרם (חיווי בפרטי ובקבוצה) ---
+system = ArbitrageArchitect()
 
 @bot.message_handler(commands=['status'])
 def handle_status(message):
-    data = sys_manager.get_settings_data()
+    data = system.get_data()
     if data:
-        # יצירת הודעה מעוצבת לפי הנתונים שרואים ב-image_24be54.png
-        msg = f"📊 *Arbit-Bot-Live-v2* (Sheet: {SHEET_NAME})\n\n"
-        for row in data:
-            name = row.get('Setting Name (A)', 'Unknown')
-            val = row.get('Value (B)', 'N/A')
-            msg += f"⚙️ *{name}*: `{val}`\n"
-        
+        msg = "📊 **מצב בוט ארביטראז' - סנכרון מלא**\n\n"
+        msg += f"⏱ **אינטרוול:** `{data['params'].get('Scan_Interval_Seconds', 'N/A')}` שניות\n"
+        msg += f"💰 **רווח מטרה:** `{data['params'].get('Target_Profit_Percent', 'N/A')}`%\n"
+        msg += f"🏛 **בורסות:** {', '.join(data['exchanges']) if data['exchanges'] else 'אין'}\n"
+        msg += f"📈 **צמדים:** {', '.join(data['pairs']) if data['pairs'] else 'אין'}\n"
         bot.reply_to(message, msg, parse_mode='Markdown')
     else:
-        bot.reply_to(message, "❌ שגיאת סינכרון: וודא שה-APIs מופעלים וההרשאות תקינות.")
-
-# --- הרצה יציבה עם Auto-Restart ---
+        bot.reply_to(message, "❌ שגיאה: לא ניתן למשוך נתונים מהאקסל. בדוק את ה-Logs ב-Render.")
 
 if __name__ == "__main__":
-    logger.info("System initializing...")
-    sys_manager.connect()
-    
+    logger.info("System Starting...")
+    # מנגנון Watchdog למניעת קריסות
     while True:
         try:
-            logger.info("Bot is polling...")
-            bot.polling(none_stop=True, interval=0, timeout=40)
+            bot.polling(none_stop=True, interval=0, timeout=20)
         except Exception as e:
-            logger.error(f"Polling error: {e}")
-            time.sleep(10) # המתנה לפני ניסיון חוזר
+            logger.error(f"Polling Restarting due to: {e}")
+            time.sleep(5)
